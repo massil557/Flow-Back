@@ -18,7 +18,11 @@ import google.generativeai as genai
 # Importation de tes fichiers locaux
 from database import SessionLocal, engine, Base
 import models
-from models import Alerte
+from models import Alerte, Utilisateur, Role
+
+# ── Auth imports ──────────────────────────────────────────────────────────────
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from auth import hash_password, verify_password, create_access_token, decode_access_token
 
 # --- INITIALISATION ---
 app = FastAPI(title="Industrial IoT Gateway - Master 2")
@@ -483,3 +487,52 @@ async def get_alerts(db: Session = Depends(get_db)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTH ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
+class UserPublic(BaseModel):
+    id: int
+    username: str
+    role: str
+    class Config:
+        from_attributes = True
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserPublic:
+    credentials_exc = HTTPException(
+        status_code=401, detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    payload = decode_access_token(token)
+    if payload is None:
+        raise credentials_exc
+    username: str = payload.get("sub")
+    if not username:
+        raise credentials_exc
+    user = db.query(Utilisateur).filter(Utilisateur.username == username).first()
+    if not user:
+        raise credentials_exc
+    role = db.query(Role).filter(Role.id == user.role_id).first()
+    return UserPublic(id=user.id, username=user.username, role=role.nom if role else "unknown")
+
+@app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(Utilisateur).filter(Utilisateur.username == form_data.username).first()
+    dummy_hash = "$2b$12$notarealhashjustfortimingat0"
+    valid = verify_password(form_data.password, user.password_hash if user else dummy_hash)
+    if not user or not valid:
+        raise HTTPException(status_code=401, detail="Nom d'utilisateur ou mot de passe incorrect", headers={"WWW-Authenticate": "Bearer"})
+    role = db.query(Role).filter(Role.id == user.role_id).first()
+    token = create_access_token({"sub": user.username, "user_id": user.id, "role": role.nom if role else "unknown"})
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.get("/auth/me", response_model=UserPublic, tags=["auth"])
+def read_me(current_user: UserPublic = Depends(get_current_user)):
+    return current_user

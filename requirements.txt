@@ -5,3 +5,8 @@ asyncua
 aiosmtplib
 openai
 reportlab
+bcrypt
+python-jose[cryptography]
+python-multipart
+google-generativeai
+psycopg2-binary

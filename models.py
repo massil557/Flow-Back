@@ -42,6 +42,17 @@ class Mesure(Base):
     capteur_id = Column(Integer, ForeignKey("capteurs.id"), primary_key=True)
     valeur = Column(Float, nullable=False)
 
+    # 6. Table des Alertes
+class Alerte(Base):
+    __tablename__ = "alertes"
+    id = Column(Integer, primary_key=True, index=True)
+    time = Column(DateTime(timezone=True), default=datetime.datetime.utcnow)
+    capteur_code = Column(String(50)) # Vérifie que c'est bien capteur_code et non code_unique
+    valeur = Column(Float, nullable=False)
+    seuil_depasse = Column(Float, nullable=False)
+    message = Column(Text)
+    is_resolved = Column(Boolean, default=False)
+
 # --- FONCTION DE CRÉATION AUTOMATIQUE ---
 def init_db():
     print("Création des tables dans PostgreSQL...")

@@ -1,6 +1,5 @@
-# seed_users.py
-# Run ONCE after the DB tables are created:  python seed_users.py
-# This creates the roles and two default users with bcrypt-hashed passwords.
+# seed_users.py — Run once to create roles + default users
+# python seed_users.py
 
 from database import SessionLocal
 from models import Role, Utilisateur
@@ -16,14 +15,24 @@ def seed_users():
         if not role:
             role = Role(nom=nom)
             db.add(role)
-            db.flush()          # get the id without committing yet
+            db.flush()
             print(f"✅ Role créé : {nom}")
         roles[nom] = role
 
-    # ── 2. Users ──────────────────────────────────────────────────────────────
+    # ── 2. Default users (with email) ────────────────────────────────────────
     users_to_create = [
-        {"username": "admin",   "password": "admin123",   "role": "admin"},
-        {"username": "massil",  "password": "massil123",  "role": "automatician"},
+        {
+            "username": "admin",
+            "password": "admin123",
+            "email":    "admin@cevital.dz",
+            "role":     "admin",
+        },
+        {
+            "username": "massil",
+            "password": "massil123",
+            "email":    "massil@cevital.dz",
+            "role":     "automatician",
+        },
     ]
 
     for u in users_to_create:
@@ -31,17 +40,18 @@ def seed_users():
         if not exists:
             new_user = Utilisateur(
                 username      = u["username"],
-                password_hash = hash_password(u["password"]),   # bcrypt hash
+                password_hash = hash_password(u["password"]),
+                email         = u["email"],
                 role_id       = roles[u["role"]].id,
             )
             db.add(new_user)
-            print(f"✅ Utilisateur créé : {u['username']}  (role: {u['role']})")
+            print(f"✅ Utilisateur créé : {u['username']} ({u['role']}) → {u['email']}")
         else:
-            print(f"ℹ️  Utilisateur déjà existant : {u['username']}")
+            print(f"ℹ️  Déjà existant : {u['username']}")
 
     db.commit()
     db.close()
-    print("\n🎉 Seed terminé. Vous pouvez maintenant vous connecter.")
+    print("\n🎉 Seed terminé.")
 
 if __name__ == "__main__":
     seed_users()

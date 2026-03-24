@@ -70,7 +70,21 @@ last_two = {}
 from collections import deque as _dq
 alerts = _dq(maxlen=200)
 
-DANGER_THRESHOLD = 30
+# Per-sensor-type thresholds (matches simulator danger ranges)
+SENSOR_THRESHOLDS = {
+    'TEMP': 30.0,   # °C
+    'PRES': 4.0,    # bar
+    'HUMI': 80.0,   # %
+    'CO2':  900.0,  # ppm
+}
+DEFAULT_THRESHOLD = 30.0
+
+def get_threshold(code_unique: str) -> float:
+    for prefix, val in SENSOR_THRESHOLDS.items():
+        if prefix in code_unique.upper():
+            return val
+    return DEFAULT_THRESHOLD
+
 _email_cooldown = {}
 EMAIL_COOLDOWN_SECONDS = 300
 from email.message import EmailMessage
@@ -138,24 +152,26 @@ async def log_and_cache_forever():
                         if len(last_two[s.code_unique]) > 2:
                             last_two[s.code_unique].pop(0)
 
-                        if val >= DANGER_THRESHOLD:
+                        sensor_threshold = get_threshold(s.code_unique)
+                        if val >= sensor_threshold:
                             prev_vals = last_two.get(s.code_unique, [])
                             prev_val = prev_vals[-2] if len(prev_vals) > 1 else None
-                            if prev_val is None or prev_val < DANGER_THRESHOLD:
-                                alert_msg = f"Valeur {val} >= seuil {DANGER_THRESHOLD}"
-                                alert = {
-                                    "code": s.code_unique,
-                                    "value": val,
-                                    "time": current_time,
-                                    "msg": alert_msg,
-                                }
-                                alerts.append(alert)
-                                print(f"[ALERTE] ajoutée {alert}")
-                                pass
-                                  # now_ts = datetime.utcnow().timestamp()
-                                  # if now_ts - _email_cooldown.get(s.code_unique, 0) > EMAIL_COOLDOWN_SECONDS:
-                                  #     _email_cooldown[s.code_unique] = now_ts
-                                  #     asyncio.create_task(send_alert_email(s.code_unique, val, current_time, alert_msg))
+                            if prev_val is None or prev_val < sensor_threshold:
+                                alert_msg = f"Valeur {val} >= seuil {sensor_threshold}"
+                                # Save to DB
+                                db_alert = models.Alerte(
+                                    capteur_code=s.code_unique,
+                                    valeur=val,
+                                    seuil_depasse=sensor_threshold,
+                                    message=alert_msg,
+                                    time=datetime.utcnow(),
+                                    is_resolved=False
+                                )
+                                db.add(db_alert)
+                                # now_ts = datetime.utcnow().timestamp()
+                                # if now_ts - _email_cooldown.get(s.code_unique, 0) > EMAIL_COOLDOWN_SECONDS:
+                                #     _email_cooldown[s.code_unique] = now_ts
+                                #     asyncio.create_task(send_alert_email(s.code_unique, val, current_time, alert_msg))
 
                         new_measure = models.Mesure(
                             capteur_id=s.id,
@@ -354,14 +370,30 @@ def save_alert_to_db(db: Session, code: str, value: float, threshold: float):
 async def _analyze_with_ai(points: list[GraphPoint], sensor_name: str, threshold: float) -> str:
     try:
         import httpx
-        recent_values = [p.y for p in points[-30:]]
-        if not recent_values:
+        all_values = [p.y for p in points]
+        if not all_values:
             return "1) DIAGNOSTIC: Aucune donnee disponible.\n2) TENDANCE: Aucune donnee.\n3) RECOMMANDATION: Verifier la connexion du capteur."
 
-        min_val   = round(min(recent_values), 2)
-        max_val   = round(max(recent_values), 2)
-        avg_val   = round(sum(recent_values) / len(recent_values), 2)
-        over_threshold = len([v for v in recent_values if v >= threshold])
+        # Smart sampling: keep all stats from full dataset, but limit prompt size for 8GB RAM
+        # Use representative sample: first + last + evenly spaced points (max 60 values)
+        MAX_SAMPLE = 60
+        if len(all_values) <= MAX_SAMPLE:
+            sampled = all_values
+        else:
+            step = len(all_values) / MAX_SAMPLE
+            sampled = [all_values[int(i * step)] for i in range(MAX_SAMPLE)]
+
+        # Stats always from FULL dataset
+        min_val   = round(min(all_values), 2)
+        max_val   = round(max(all_values), 2)
+        avg_val   = round(sum(all_values) / len(all_values), 2)
+        over_threshold = len([v for v in all_values if v >= threshold])
+        # Trend from sampled (first third vs last third)
+        third = max(1, len(sampled) // 3)
+        avg_start = sum(sampled[:third]) / third
+        avg_end   = sum(sampled[-third:]) / third
+        trend_hint = "montee" if avg_end > avg_start * 1.05 else "descente" if avg_end < avg_start * 0.95 else "stable"
+        recent_values = sampled  # used for prompt context
         is_alert  = over_threshold > 0
 
         code = sensor_name.upper()
@@ -387,7 +419,7 @@ async def _analyze_with_ai(points: list[GraphPoint], sensor_name: str, threshold
             unit        = "u"
 
         status = "ALERTE CRITIQUE" if is_alert else "STABLE"
-        base   = f"Capteur {sensor_type} '{sensor_name}'. Min={min_val}{unit} Max={max_val}{unit} Moy={avg_val}{unit} Seuil={threshold}{unit} Depassements={over_threshold}/{len(recent_values)}. Etat={status}."
+        base   = f"Capteur {sensor_type} '{sensor_name}'. Min={min_val}{unit} Max={max_val}{unit} Moy={avg_val}{unit} Seuil={threshold}{unit} Depassements={over_threshold}/{len(all_values)} mesures. Tendance={trend_hint}. Etat={status}."
 
         async with httpx.AsyncClient(timeout=300.0) as client:
 
@@ -795,10 +827,6 @@ async def get_last_two():
 async def get_last_two_for_sensor(code_unique: str):
     return {code_unique: last_two.get(code_unique, [])}
 
-@app.get("/api/alerts")
-async def get_alerts():
-    return list(alerts)
-
 @app.get("/api/sensors")
 def get_sensors_list(db: Session = Depends(get_db)):
     return db.query(models.Capteur).filter(models.Capteur.is_activated == True).all()
@@ -900,17 +928,45 @@ async def trigger_alert(alert_data: AlertTrigger, db: Session = Depends(get_db))
     
 @app.get("/api/alerts")
 async def get_alerts(db: Session = Depends(get_db)):
-    alerts = db.query(Alerte).order_by(Alerte.time.desc()).limit(50).all()
+    alerts = db.query(Alerte).order_by(Alerte.time.desc()).limit(100).all()
     return [
         {
             "id": a.id,
             "code": a.capteur_code,
-            "time": a.time.strftime("%H:%M:%S"),
+            "time": a.time.strftime("%d/%m %H:%M:%S"),
             "value": a.valeur,
+            "seuil": a.seuil_depasse,
             "msg": a.message,
             "is_resolved": a.is_resolved
         } for a in alerts
     ]
+
+@app.patch("/api/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(Alerte).filter(Alerte.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable")
+    alert.is_resolved = True
+    db.commit()
+    return {"success": True}
+
+@app.patch("/api/alerts/{alert_id}/ignore")
+def ignore_alert(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(Alerte).filter(Alerte.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable")
+    db.delete(alert)
+    db.commit()
+    return {"success": True}
+
+@app.delete("/api/alerts/{alert_id}")
+def delete_alert(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(Alerte).filter(Alerte.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alerte introuvable")
+    db.delete(alert)
+    db.commit()
+    return {"success": True}
 
 if __name__ == "__main__":
     import uvicorn
@@ -964,6 +1020,27 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 @app.get("/auth/me", response_model=UserPublic, tags=["auth"])
 def read_me(current_user: UserPublic = Depends(get_current_user)):
     return current_user
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+@app.patch("/auth/change-password", tags=["auth"])
+def change_password(
+    payload: ChangePasswordRequest,
+    current_user: UserPublic = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    user = db.query(Utilisateur).filter(Utilisateur.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    if not verify_password(payload.old_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Mot de passe actuel incorrect")
+    if len(payload.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Le mot de passe doit faire au moins 6 caracteres")
+    user.password_hash = hash_password(payload.new_password)
+    db.commit()
+    return {"success": True}
 
 
 # =============================================================================

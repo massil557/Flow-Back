@@ -1,12 +1,19 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+
 from app.config import ALLOWED_ORIGINS
-from app.database import Base, engine
+from app.database import Base, engine, get_db
+from app.models import Mesure, Capteur
 from app.services.opcua_client import log_and_cache_forever
+from app.services.opcua_client import get_live_cache as _get_live_cache
+from app.services.opcua_client import get_last_two as _get_last_two_cache
 from app.services.scheduler import send_scheduled_report
+from app.utils.downsampling import lttb_downsample
 from app.routers import (
     sensors_router, zones_router, alerts_router, reports_router,
     analytics_router, auth_router, admin_router
@@ -32,29 +39,54 @@ app.include_router(analytics_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
 
-# Additional direct endpoints (live-stream, last-two, history) that use the caches
-from app.services.opcua_client import get_live_cache, get_last_two
-from app.utils.downsampling import lttb_downsample
-from fastapi import Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-from app.database import get_db
-from app.models import Mesure
 
+# ── Live stream ────────────────────────────────────────────────────────────────
 @app.get("/api/live-stream")
-async def get_live_stream():
-    return get_live_cache()
+async def live_stream_endpoint():
+    return _get_live_cache()
 
+
+# ── Last-two (all sensors) ─────────────────────────────────────────────────────
 @app.get("/api/last-two")
-async def get_last_two():
-    return get_last_two()
+async def last_two_all_endpoint():
+    return _get_last_two_cache()
 
+
+# ── Last-two (single sensor) with DB fallback ─────────────────────────────────
 @app.get("/api/last-two/{code_unique}")
-async def get_last_two_for_sensor(code_unique: str):
-    return {code_unique: get_last_two().get(code_unique, [])}
+async def last_two_sensor_endpoint(code_unique: str, db: Session = Depends(get_db)):
+    # 1. Try the live OPC-UA in-memory cache first
+    cached = _get_last_two_cache().get(code_unique)
+    if cached:
+        return {code_unique: cached}
 
+    # 2. Fallback: pull the last 2 recorded values straight from the database
+    sensor = db.query(Capteur).filter(Capteur.code_unique == code_unique).first()
+    if not sensor:
+        return {code_unique: []}
+
+    rows = (
+        db.query(Mesure)
+        .filter(Mesure.capteur_id == sensor.id)
+        .order_by(Mesure.time.desc())
+        .limit(2)
+        .all()
+    )
+    # rows come back newest-first; reverse so index 0 = older, index 1 = latest
+    values = [r.valeur for r in reversed(rows)]
+    return {code_unique: values}
+
+
+# ── Long history ───────────────────────────────────────────────────────────────
 @app.get("/api/history/{capteur_id}")
-def get_long_history(capteur_id: int, hours: float | None = None, start: str | None = None, end: str | None = None, limit: int = 200, db: Session = Depends(get_db)):
+def history_endpoint(
+    capteur_id: int,
+    hours: float | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
     query = db.query(Mesure).filter(Mesure.capteur_id == capteur_id)
     if start and end:
         try:
@@ -66,26 +98,38 @@ def get_long_history(capteur_id: int, hours: float | None = None, start: str | N
     elif hours is not None and hours > 0:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         query = query.filter(Mesure.time >= cutoff)
+
     history = query.order_by(Mesure.time.asc()).all()
     result = [{"time": m.time, "valeur": m.valeur} for m in history]
     if len(result) > limit:
         result = lttb_downsample(result, limit)
     return result
 
-# Startup and shutdown events
+
+# ── Startup / shutdown ─────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     Base.metadata.create_all(bind=engine)
     asyncio.create_task(log_and_cache_forever())
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: asyncio.create_task(send_scheduled_report("daily")), CronTrigger(hour=8, minute=0))
-    scheduler.add_job(lambda: asyncio.create_task(send_scheduled_report("weekly")), CronTrigger(day_of_week='mon', hour=8, minute=0))
-    scheduler.add_job(lambda: asyncio.create_task(send_scheduled_report("monthly")), CronTrigger(day=1, hour=8, minute=0))
+    scheduler.add_job(
+        lambda: asyncio.create_task(send_scheduled_report("daily")),
+        CronTrigger(hour=8, minute=0),
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(send_scheduled_report("weekly")),
+        CronTrigger(day_of_week="mon", hour=8, minute=0),
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(send_scheduled_report("monthly")),
+        CronTrigger(day=1, hour=8, minute=0),
+    )
     scheduler.start()
     app.state.scheduler = scheduler
 
+
 @app.on_event("shutdown")
 async def shutdown_event():
-    if hasattr(app.state, 'scheduler'):
+    if hasattr(app.state, "scheduler"):
         app.state.scheduler.shutdown()

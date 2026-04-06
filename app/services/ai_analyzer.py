@@ -145,14 +145,23 @@ async def analyze_with_ai_summary(prompt: str) -> str:
     """Generate a short AI summary using the local Ollama model."""
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post("http://localhost:11434/api/generate", json={
-                "model": "gemma2:2b",
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_predict": 150, "temperature": 0.3}
-            })
-            return r.json()["response"].strip()
+        async with httpx.AsyncClient(timeout=300) as client:  # increase to 120 seconds
+            response = await client.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": "gemma2:2b",
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"num_predict": 200, "temperature": 0.3}
+                }
+            )
+            if response.status_code == 200:
+                return response.json()["response"].strip()
+            else:
+                return "Analyse IA temporairement indisponible."
+    except httpx.TimeoutException:
+        print("AI summary timeout: Ollama took too long to respond")
+        return "Analyse IA non disponible (délai dépassé)."
     except Exception as e:
         print(f"AI summary error: {e}")
         return "Analyse IA non disponible."

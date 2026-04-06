@@ -10,10 +10,12 @@ class ReportRequest(BaseModel):
 
 # For master report (daily/weekly/monthly)
 class MasterReportRequest(BaseModel):
-    period: Optional[str] = None          # "daily", "weekly", "monthly"
+    period: Optional[str] = None
     start: Optional[datetime] = None
     end: Optional[datetime] = None
     recipients: Optional[List[str]] = None
+    category: Optional[str] = None      # "Température", "Pression", "Humidité", "Qualité Air"
+    zone_id: Optional[int] = None
 
 # For email sending of report (used by send-report-email endpoint)
 class EmailReportRequest(BaseModel):

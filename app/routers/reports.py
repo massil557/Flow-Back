@@ -315,6 +315,7 @@ async def send_report_email(req: EmailReportRequest):
 # Master report (manual & scheduled)
 @router.post("/api/reports/send")
 async def send_master_report(req: MasterReportRequest, db: Session = Depends(get_db)):
+    # Determine date range (same as before)
     if req.period:
         end_date = datetime.utcnow()
         if req.period == "daily":
@@ -330,6 +331,18 @@ async def send_master_report(req: MasterReportRequest, db: Session = Depends(get
         end_date = req.end
     else:
         raise HTTPException(status_code=400, detail="Either period or start/end must be provided")
+
     recipients = req.recipients if req.recipients else [os.getenv("MANAGER_EMAIL", "manager@cevital.dz")]
-    asyncio.create_task(_send_report_background(req.period or "custom", start_date, end_date, recipients))
-    return {"success": True, "message": "La génération du rapport a commencé. Vous recevrez l'email sous peu."}
+
+    # Generate PDF with optional category and zone filters
+    pdf_buffer = await generate_master_report_pdf(
+       req.period or "custom",
+      start_date,
+     end_date,
+     db,
+     category=req.category,
+     zone_id=req.zone_id
+    )
+    pdf_bytes = pdf_buffer.getvalue()
+    asyncio.create_task(_send_report_background(pdf_bytes, recipients, req.period or "custom"))
+    return {"success": True, "message": "La generation du rapport a commence. Vous recevrez l'email sous peu."}

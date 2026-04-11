@@ -82,55 +82,13 @@ def get_zone_comparison(req: TimeSeriesRequest, db: Session = Depends(get_db)):
     ]
 
 DANGER_THRESHOLDS = {
-    "Température": 30.0,
-    "Pression":    4.0,
-    "Humidité":    80.0,
-    "Qualité Air": 900.0,
+    "Température": 85.0,
+    "Pression": 6.0,
+    "Humidité": 90.0,
+    "Qualité Air": 1000.0
 }
 
-# ── BUG 3 FIX : Fonction de calcul du score de danger ────────────────────────
-#
-# ANCIEN comportement (implicite dans predictor.py) :
-#   danger_score = (current_avg / threshold) * 100
-#   → Ex : 32°C / 85 * 100 = 37.6%  ← complètement faux si seuil réel = 30
-#
-# NOUVEAU comportement :
-#   - Sous 70% du seuil          → score linéaire 0–40%  (zone verte)
-#   - Entre 70% et 100% du seuil → score linéaire 40–79% (zone orange, pré-alerte)
-#   - Au-delà du seuil           → score 80–100%, croît rapidement (zone critique)
-#
-# Ainsi, dépasser le seuil donne TOUJOURS un score ≥ 80% (critique).
 
-def compute_danger_score(current_value: float, threshold: float) -> int:
-    """
-    Calcule un score de danger (0-100) respectant strictement les seuils.
-
-    Zones :
-      0  –  40%  : normal      (valeur < 70% du seuil)
-      40 –  79%  : modéré      (valeur entre 70% et 100% du seuil)
-      80 – 100%  : critique    (valeur >= seuil)
-    """
-    if threshold <= 0:
-        return 0
-
-    ratio = current_value / threshold  # ex: 32/85 = 0.376 | 32/30 = 1.066
-
-    if ratio >= 1.0:
-        # Zone critique : 80% de base + jusqu'à 20 pts supplémentaires
-        # Croît de 80 → 100 sur un dépassement de 0 → 25% au-dessus du seuil
-        overshoot = (ratio - 1.0) / 0.25          # 0.0 → 1.0 sur 25% de dépassement
-        score = 80 + min(20, round(overshoot * 20))
-    elif ratio >= 0.70:
-        # Zone modérée : 40% → 79%
-        # Interpolation linéaire entre 70% et 100% du seuil
-        normalized = (ratio - 0.70) / 0.30        # 0.0 → 1.0
-        score = 40 + round(normalized * 39)
-    else:
-        # Zone normale : 0% → 39%
-        normalized = ratio / 0.70                 # 0.0 → 1.0
-        score = round(normalized * 39)
-
-    return max(0, min(100, score))
 
 
 class PredictionRequest(BaseModel):
@@ -141,10 +99,11 @@ class PredictionRequest(BaseModel):
 
 @router.post("/predict")
 async def get_prediction(req: PredictionRequest, db: Session = Depends(get_db)):
+    # Define these FIRST — before any branching logic
     threshold = DANGER_THRESHOLDS.get(req.category, 100.0)
-    unit_map  = {"Température": "°C", "Pression": "bar", "Humidité": "%", "Qualité Air": "ppm"}
-    unit      = unit_map.get(req.category, "u")
-    horizons  = req.horizons if req.horizons else [1, 6, 24]
+    unit_map = {"Température": "°C", "Pression": "bar", "Humidité": "%", "Qualité Air": "ppm"}
+    unit = unit_map.get(req.category, "u")
+    horizons = req.horizons if req.horizons else [1, 6, 24]
 
     try:
         result = predict_future(
@@ -160,29 +119,21 @@ async def get_prediction(req: PredictionRequest, db: Session = Depends(get_db)):
 
     if result is None:
         return {
-            "predictions":  {str(h): 0.0 for h in horizons},
+            "predictions": {str(h): 0.0 for h in horizons},
             "danger_score": 0,
-            "current_avg":  0.0,
-            "threshold":    threshold,
-            "narrative":    "Données insuffisantes pour la prévision.",
-            "category":     req.category,
-            "unit":         unit,
+            "current_avg": 0.0,
+            "threshold": threshold,
+            "narrative": "Données insuffisantes pour la prévision.",
+            "category": req.category,
+            "unit": unit,
         }
 
-    # ── BUG 3 FIX : recalcul du score avec la nouvelle fonction ──────────────
-    # On écrase le danger_score éventuellement renvoyé par predict_future
-    # pour garantir la cohérence avec nos seuils définis dans DANGER_THRESHOLDS.
-    corrected_danger_score = compute_danger_score(
-        current_value=result.get("current_avg", 0.0),
-        threshold=threshold
-    )
-
-    preds_text = ", ".join([f"dans {h}h: {v:.2f}" for h, v in result["predictions"].items()])
+    preds_text = ", ".join([f"dans {h}h: {v}" for h, v in result["predictions"].items()])
     ollama_prompt = (
         f"Capteur {req.category}. Valeur actuelle: {result['current_avg']}{unit}. "
         f"Seuil danger: {threshold}{unit}. "
         f"Prévisions ML: {preds_text}{unit}. "
-        f"Score danger: {corrected_danger_score}%. "
+        f"Score danger: {result['danger_score']}%. "
         f"Donne UNE phrase d'alerte préventive en français pour l'opérateur."
     )
 
@@ -190,9 +141,9 @@ async def get_prediction(req: PredictionRequest, db: Session = Depends(get_db)):
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post("http://localhost:11434/api/generate", json={
-                "model":   "gemma2:2b",
-                "prompt":  ollama_prompt,
-                "stream":  False,
+                "model": "gemma2:2b",
+                "prompt": ollama_prompt,
+                "stream": False,
                 "options": {"num_predict": 80, "temperature": 0.1}
             })
             narrative = r.json()["response"].strip()
@@ -201,10 +152,9 @@ async def get_prediction(req: PredictionRequest, db: Session = Depends(get_db)):
 
     return {
         **result,
-        "predictions":  {str(k): v for k, v in result["predictions"].items()},
-        "danger_score": corrected_danger_score,   # ← score corrigé
-        "category":     req.category,
-        "unit":         unit,
-        "threshold":    threshold,                # ← toujours retourné pour sync frontend
-        "narrative":    narrative,
+        "predictions": {str(k): v for k, v in result["predictions"].items()},
+        "category": req.category,
+        "unit": unit,
+        "threshold": threshold,
+        "narrative": narrative
     }

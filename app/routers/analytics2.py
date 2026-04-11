@@ -82,10 +82,10 @@ def get_zone_comparison(req: TimeSeriesRequest, db: Session = Depends(get_db)):
     ]
 
 DANGER_THRESHOLDS = {
-    "Température": 30.0,
-    "Pression":    4.0,
-    "Humidité":    80.0,
-    "Qualité Air": 900.0,
+    "Température": 85.0,
+    "Pression":    6.0,
+    "Humidité":    90.0,
+    "Qualité Air": 1000.0,
 }
 
 # ── BUG 3 FIX : Fonction de calcul du score de danger ────────────────────────

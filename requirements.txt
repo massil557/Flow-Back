@@ -10,3 +10,7 @@ python-jose[cryptography]
 python-multipart
 google-generativeai
 psycopg2-binary
+scikit-learn
+numpy
+joblib
+xgboost

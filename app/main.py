@@ -1,3 +1,9 @@
+"""
+app/main.py  (mis à jour — ajout du router alert_configs)
+Seule modification : import + include_router pour alert_configs_router.
+Tout le reste est identique à l'original.
+"""
+
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
@@ -9,6 +15,9 @@ from datetime import datetime, timedelta
 from app.config import ALLOWED_ORIGINS
 from app.database import Base, engine, get_db
 from app.models import Mesure, Capteur
+# ── NOUVEAU ──────────────────────────────────────────────────────────────────
+from app.models.alert_config import AlertConfig          # force la création de la table
+# ─────────────────────────────────────────────────────────────────────────────
 from app.services.opcua_client import log_and_cache_forever
 from app.services.opcua_client import get_live_cache as _get_live_cache
 from app.services.opcua_client import get_last_two as _get_last_two_cache
@@ -18,6 +27,11 @@ from app.routers import (
     sensors_router, zones_router, alerts_router, reports_router,
     analytics_router, auth_router, admin_router
 )
+# ── NOUVEAU ──────────────────────────────────────────────────────────────────
+from app.routers.alert_configs import router as alert_configs_router
+# ─────────────────────────────────────────────────────────────────────────────
+from app.routers.email_mute import router as email_mute_router
+from app.routers.server_status import router as server_status_router
 
 app = FastAPI(title="Industrial IoT Gateway - Master 2")
 
@@ -30,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
+# ── Routers existants ─────────────────────────────────────────────────────────
 app.include_router(sensors_router)
 app.include_router(zones_router)
 app.include_router(alerts_router)
@@ -38,6 +52,11 @@ app.include_router(reports_router)
 app.include_router(analytics_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
+
+# ── NOUVEAU router ────────────────────────────────────────────────────────────
+app.include_router(alert_configs_router)
+app.include_router(email_mute_router)
+app.include_router(server_status_router)
 
 
 # ── Live stream ────────────────────────────────────────────────────────────────
@@ -55,12 +74,10 @@ async def last_two_all_endpoint():
 # ── Last-two (single sensor) with DB fallback ─────────────────────────────────
 @app.get("/api/last-two/{code_unique}")
 async def last_two_sensor_endpoint(code_unique: str, db: Session = Depends(get_db)):
-    # 1. Try the live OPC-UA in-memory cache first
     cached = _get_last_two_cache().get(code_unique)
     if cached:
         return {code_unique: cached}
 
-    # 2. Fallback: pull the last 2 recorded values straight from the database
     sensor = db.query(Capteur).filter(Capteur.code_unique == code_unique).first()
     if not sensor:
         return {code_unique: []}
@@ -72,7 +89,6 @@ async def last_two_sensor_endpoint(code_unique: str, db: Session = Depends(get_d
         .limit(2)
         .all()
     )
-    # rows come back newest-first; reverse so index 0 = older, index 1 = latest
     values = [r.valeur for r in reversed(rows)]
     return {code_unique: values}
 
@@ -91,16 +107,16 @@ def history_endpoint(
     if start and end:
         try:
             start_dt = datetime.fromisoformat(start)
-            end_dt = datetime.fromisoformat(end)
+            end_dt   = datetime.fromisoformat(end)
             query = query.filter(Mesure.time >= start_dt, Mesure.time <= end_dt)
         except ValueError:
             raise HTTPException(status_code=400, detail="Format de date invalide.")
     elif hours is not None and hours > 0:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
-        query = query.filter(Mesure.time >= cutoff)
+        query  = query.filter(Mesure.time >= cutoff)
 
     history = query.order_by(Mesure.time.asc()).all()
-    result = [{"time": m.time, "valeur": m.valeur} for m in history]
+    result  = [{"time": m.time, "valeur": m.valeur} for m in history]
     if len(result) > limit:
         result = lttb_downsample(result, limit)
     return result
@@ -109,6 +125,7 @@ def history_endpoint(
 # ── Startup / shutdown ─────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
+    # Crée toutes les tables (y compris alert_configs)
     Base.metadata.create_all(bind=engine)
     asyncio.create_task(log_and_cache_forever())
 

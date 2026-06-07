@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from datetime import datetime
 from app.database import get_db
 from app.models import Alerte
@@ -28,19 +29,35 @@ async def trigger_alert(alert_data: AlertTrigger, db: Session = Depends(get_db))
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("")
-async def get_alerts(db: Session = Depends(get_db)):
-    alerts = db.query(Alerte).order_by(Alerte.time.desc()).limit(100).all()
-    return [
-        {
-            "id": a.id,
-            "code": a.capteur_code,
-            "time": a.time.strftime("%d/%m %H:%M:%S"),
-            "value": a.valeur,
-            "seuil": a.seuil_depasse,
-            "msg": a.message,
-            "is_resolved": a.is_resolved
-        } for a in alerts
-    ]
+async def get_alerts(
+    page: int = Query(1, ge=1),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    total = db.query(func.count(Alerte.id)).scalar()
+    total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
+    offset_val = (page - 1) * limit
+    alerts = db.query(Alerte).order_by(Alerte.time.desc()).offset(offset_val).limit(limit).all()
+    return {
+        "total": total,
+        "totalPages": total_pages,
+        "page": page,
+        "limit": limit,
+        "items": [
+            {
+                "id": a.id,
+                "code": a.capteur_code,
+                "time": a.time.strftime("%d/%m %H:%M:%S"),
+                "value": a.valeur,
+                "seuil": a.seuil_depasse,
+                "msg": a.message,
+                "is_resolved": a.is_resolved,
+                "severity": a.severity or "danger",
+                "is_rule_based": a.is_rule_based or False,
+                "rule_id": a.rule_id
+            } for a in alerts
+        ]
+    }
 
 @router.patch("/{alert_id}/resolve")
 def resolve_alert(alert_id: int, db: Session = Depends(get_db)):

@@ -18,7 +18,9 @@ from datetime import datetime
 from app.database import get_db
 from app.models.alert_config import AlertConfig
 from app.schemas.alert_config import AlertConfigCreate, AlertConfigUpdate, AlertConfigOut
+from app.schemas.auth import UserPublic
 from app.services.email_service import send_alert_config_email
+from .auth import require_admin
 
 router = APIRouter(prefix="/api/alert-configs", tags=["Alert Configs"])
 
@@ -33,7 +35,7 @@ def get_alert_configs(db: Session = Depends(get_db)):
 # ── POST create ──────────────────────────────────────────────────────────────
 
 @router.post("", response_model=AlertConfigOut, status_code=201)
-def create_alert_config(data: AlertConfigCreate, db: Session = Depends(get_db)):
+def create_alert_config(data: AlertConfigCreate, db: Session = Depends(get_db), _: UserPublic = Depends(require_admin)):
     # Validation : danger doit être >= warning
     if data.danger_threshold < data.warning_threshold:
         raise HTTPException(
@@ -94,7 +96,7 @@ def toggle_alert_config(config_id: int, db: Session = Depends(get_db)):
 # ── DELETE ───────────────────────────────────────────────────────────────────
 
 @router.delete("/{config_id}")
-def delete_alert_config(config_id: int, db: Session = Depends(get_db)):
+def delete_alert_config(config_id: int, db: Session = Depends(get_db), _: UserPublic = Depends(require_admin)):
     config = db.query(AlertConfig).filter(AlertConfig.id == config_id).first()
     if not config:
         raise HTTPException(status_code=404, detail="Règle introuvable")

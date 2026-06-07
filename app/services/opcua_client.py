@@ -1,19 +1,15 @@
 """
-app/services/opcua_client.py  (version mise à jour)
-─────────────────────────────────────────────────────
-Utilise les AlertConfig en base de données pour déterminer les seuils
-warning et danger au lieu des seuils codés en dur dans config.py.
-
-Nouveau comportement :
-  • Si une AlertConfig active correspond au capteur → on l'utilise
-  • Sinon → fallback sur get_threshold() (ancien comportement, inchangé)
-  • Les emails sont envoyés aux destinataires configurés dans l'AlertConfig
-  • Un cooldown par (capteur, niveau) évite le spam
+app/services/opcua_client.py
+─────────────────────────────
+Reads sensor values from the OPC UA server, persists them, and runs
+both legacy AlertConfig and new AlertRule evaluations.
+Email cooldown is now managed inside email_service.py against the DB.
 """
 
 import asyncio
+import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from asyncua import Client
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
@@ -21,33 +17,44 @@ from app.models import Capteur, Alerte, Mesure
 from app.models.alert_config import AlertConfig
 from app.config import OPC_URL, get_threshold
 from app.services.email_service import send_alert_config_email, send_alert_email
+from app.services.rule_evaluator import evaluate_rules_for_sensor
+
+logger = logging.getLogger("opcua_client")
 
 live_cache = {}
 last_two   = {}
 
-# Cooldown : { (capteur_code, level): datetime_dernier_envoi }
-_email_cooldowns: dict[tuple, datetime] = {}
+# Keep strong references to asyncio tasks so they are not GC'd before completion
+_pending_email_tasks: list[asyncio.Task] = []
 
 
-def _get_matching_config(sensor_code: str, db: Session) -> AlertConfig | None:
+def _run_email_task(coro) -> None:
+    task = asyncio.create_task(coro)
+
+    def _done_cb(t: asyncio.Task) -> None:
+        _pending_email_tasks[:] = [t_ for t_ in _pending_email_tasks if t_ is not t]
+        exc = t.exception()
+        if exc:
+            logger.error(f"[EmailTask] Failed to send email: {exc}")
+
+    task.add_done_callback(_done_cb)
+    _pending_email_tasks.append(task)
+
+
+def _get_matching_config(sensor_code: str, sensor_id: int, db: Session) -> AlertConfig | None:
     """
-    Trouve la première AlertConfig active dont le sensor_prefix
-    correspond au code du capteur (insensible à la casse).
+    Trouve la première AlertConfig active correspondant au capteur.
+    Priorité : sensor_id exact → préfixe dans le code.
     """
     configs = db.query(AlertConfig).filter(AlertConfig.is_enabled == True).all()
+    for cfg in configs:
+        if cfg.sensor_id == sensor_id:
+            return cfg
     code_upper = sensor_code.upper()
     for cfg in configs:
         if cfg.sensor_prefix.upper() in code_upper:
             return cfg
     return None
-
-
-def _cooldown_ok(key: tuple, interval_minutes: int) -> bool:
-    """Retourne True si l'email peut être envoyé (cooldown écoulé)."""
-    last = _email_cooldowns.get(key)
-    if last is None:
-        return True
-    return datetime.utcnow() - last >= timedelta(minutes=interval_minutes)
 
 
 async def log_and_cache_forever():
@@ -70,12 +77,10 @@ async def log_and_cache_forever():
                         val = round(float(val_brute), 2)
                         current_time = datetime.now().strftime("%H:%M:%S")
 
-                        # ── Live cache (20 derniers points) ──────────────────
                         if s.code_unique not in live_cache:
                             live_cache[s.code_unique] = deque(maxlen=20)
                         live_cache[s.code_unique].append({"v": val, "t": current_time})
 
-                        # ── Last-two cache ────────────────────────────────────
                         if s.code_unique not in last_two:
                             last_two[s.code_unique] = []
                         last_two[s.code_unique].append(val)
@@ -85,13 +90,10 @@ async def log_and_cache_forever():
                         prev_vals = last_two.get(s.code_unique, [])
                         prev_val  = prev_vals[-2] if len(prev_vals) > 1 else None
 
-                        # ── Résolution des seuils ────────────────────────────
-                        cfg = _get_matching_config(s.code_unique, db)
+                        cfg = _get_matching_config(s.code_unique, s.id, db)
 
                         if cfg:
-                            # ── Niveau DANGER ─────────────────────────────────
                             if val >= cfg.danger_threshold:
-                                # Créer l'alerte en BDD si c'est un nouveau franchissement
                                 if prev_val is None or prev_val < cfg.danger_threshold:
                                     db.add(Alerte(
                                         capteur_code  = s.code_unique,
@@ -105,28 +107,24 @@ async def log_and_cache_forever():
                                         is_resolved   = False,
                                     ))
 
-                                # Email avec cooldown
-                                cooldown_key = (s.code_unique, "danger")
-                                if _cooldown_ok(cooldown_key, cfg.reminder_interval_min):
-                                    recipients = [
-                                        r.strip()
-                                        for r in cfg.email_recipients.split(",")
-                                        if r.strip()
-                                    ]
-                                    if recipients:
-                                        asyncio.create_task(send_alert_config_email(
-                                            recipients    = recipients,
-                                            sensor_prefix = s.code_unique,
-                                            label         = cfg.label,
-                                            level         = "danger",
-                                            value         = val,
-                                            threshold     = cfg.danger_threshold,
-                                            custom_message= cfg.custom_message,
-                                            timestamp     = datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
-                                        ))
-                                        _email_cooldowns[cooldown_key] = datetime.utcnow()
+                                recipients = [
+                                    r.strip()
+                                    for r in cfg.email_recipients.split(",")
+                                    if r.strip()
+                                ]
+                                if recipients:
+                                    _run_email_task(send_alert_config_email(
+                                        recipients    = recipients,
+                                        sensor_prefix = s.code_unique,
+                                        label         = cfg.label,
+                                        level         = "danger",
+                                        value         = val,
+                                        threshold     = cfg.danger_threshold,
+                                        custom_message= cfg.custom_message,
+                                        timestamp     = datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
+                                        config_id     = cfg.id,
+                                    ))
 
-                            # ── Niveau WARNING (sous danger) ─────────────────
                             elif val >= cfg.warning_threshold:
                                 if prev_val is None or prev_val < cfg.warning_threshold:
                                     db.add(Alerte(
@@ -141,28 +139,25 @@ async def log_and_cache_forever():
                                         is_resolved   = False,
                                     ))
 
-                                cooldown_key = (s.code_unique, "warning")
-                                if _cooldown_ok(cooldown_key, cfg.reminder_interval_min):
-                                    recipients = [
-                                        r.strip()
-                                        for r in cfg.email_recipients.split(",")
-                                        if r.strip()
-                                    ]
-                                    if recipients:
-                                        asyncio.create_task(send_alert_config_email(
-                                            recipients    = recipients,
-                                            sensor_prefix = s.code_unique,
-                                            label         = cfg.label,
-                                            level         = "warning",
-                                            value         = val,
-                                            threshold     = cfg.warning_threshold,
-                                            custom_message= cfg.custom_message,
-                                            timestamp     = datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
-                                        ))
-                                        _email_cooldowns[cooldown_key] = datetime.utcnow()
+                                recipients = [
+                                    r.strip()
+                                    for r in cfg.email_recipients.split(",")
+                                    if r.strip()
+                                ]
+                                if recipients:
+                                    _run_email_task(send_alert_config_email(
+                                        recipients    = recipients,
+                                        sensor_prefix = s.code_unique,
+                                        label         = cfg.label,
+                                        level         = "warning",
+                                        value         = val,
+                                        threshold     = cfg.warning_threshold,
+                                        custom_message= cfg.custom_message,
+                                        timestamp     = datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
+                                        config_id     = cfg.id,
+                                    ))
 
                         else:
-                            # ── Fallback : ancien comportement ────────────────
                             sensor_threshold = get_threshold(s.code_unique)
                             if val >= sensor_threshold:
                                 if prev_val is None or prev_val < sensor_threshold:
@@ -175,17 +170,15 @@ async def log_and_cache_forever():
                                         time          = datetime.utcnow(),
                                         is_resolved   = False,
                                     ))
-                                    cooldown_key = (s.code_unique, "danger")
-                                    if _cooldown_ok(cooldown_key, 30):
-                                        asyncio.create_task(send_alert_email(
-                                            sensor_code = s.code_unique,
-                                            value       = val,
-                                            timestamp   = current_time,
-                                            message     = alert_msg,
-                                        ))
-                                        _email_cooldowns[cooldown_key] = datetime.utcnow()
+                                    _run_email_task(send_alert_email(
+                                        sensor_code = s.code_unique,
+                                        value       = val,
+                                        timestamp   = current_time,
+                                        message     = alert_msg,
+                                    ))
 
-                        # ── Persistance en BDD ────────────────────────────────
+                        evaluate_rules_for_sensor(s.id, s.code_unique, val)
+
                         db.add(Mesure(
                             capteur_id = s.id,
                             valeur     = val,

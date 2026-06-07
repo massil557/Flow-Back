@@ -1,7 +1,6 @@
 """
-app/main.py  (mis à jour — ajout du router alert_configs)
-Seule modification : import + include_router pour alert_configs_router.
-Tout le reste est identique à l'original.
+app/main.py  (mis à jour)
+Ajout : admin_settings_router, AppSetting model import
 """
 
 from fastapi import FastAPI, Depends, HTTPException, Query
@@ -15,9 +14,10 @@ from datetime import datetime, timedelta
 from app.config import ALLOWED_ORIGINS
 from app.database import Base, engine, get_db
 from app.models import Mesure, Capteur
-# ── NOUVEAU ──────────────────────────────────────────────────────────────────
-from app.models.alert_config import AlertConfig          # force la création de la table
-# ─────────────────────────────────────────────────────────────────────────────
+from app.models.alert_config import AlertConfig
+from app.models.alert_rule import AlertRule
+from app.models.alert_email_log import AlertEmailLog
+from app.models.app_setting import AppSetting
 from app.services.opcua_client import log_and_cache_forever
 from app.services.opcua_client import get_live_cache as _get_live_cache
 from app.services.opcua_client import get_last_two as _get_last_two_cache
@@ -30,8 +30,10 @@ from app.routers import (
 # ── NOUVEAU ──────────────────────────────────────────────────────────────────
 from app.routers.alert_configs import router as alert_configs_router
 # ─────────────────────────────────────────────────────────────────────────────
+from app.routers.alert_rules import router as alert_rules_router
 from app.routers.email_mute import router as email_mute_router
 from app.routers.server_status import router as server_status_router
+from app.routers.admin_settings import router as admin_settings_router
 
 app = FastAPI(title="Industrial IoT Gateway - Master 2")
 
@@ -55,8 +57,10 @@ app.include_router(admin_router)
 
 # ── NOUVEAU router ────────────────────────────────────────────────────────────
 app.include_router(alert_configs_router)
+app.include_router(alert_rules_router)
 app.include_router(email_mute_router)
 app.include_router(server_status_router)
+app.include_router(admin_settings_router)
 
 
 # ── Live stream ────────────────────────────────────────────────────────────────

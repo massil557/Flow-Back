@@ -8,6 +8,7 @@ class UserPublic(BaseModel):
     id: int
     username: str
     role: str
+    is_admin: bool = False
 
 class ChangePasswordRequest(BaseModel):
     old_password: str

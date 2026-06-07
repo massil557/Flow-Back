@@ -43,6 +43,7 @@ def seed_users():
                 password_hash = hash_password(u["password"]),
                 email         = u["email"],
                 role_id       = roles[u["role"]].id,
+                is_admin      = (u["role"] == "admin"),
             )
             db.add(new_user)
             print(f"✅ Utilisateur créé : {u['username']} ({u['role']}) → {u['email']}")

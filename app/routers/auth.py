@@ -25,18 +25,27 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if not user:
         raise credentials_exc
     role = db.query(Role).filter(Role.id == user.role_id).first()
-    return UserPublic(id=user.id, username=user.username, role=role.nom if role else "unknown")
+    return UserPublic(id=user.id, username=user.username, role=role.nom if role else "unknown", is_admin=user.is_admin)
 
 @router.post("/login", response_model=TokenResponse)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Utilisateur).filter(Utilisateur.username == form_data.username).first()
-    dummy_hash = "$2b$12$notarealhashjustfortimingat0"
+    dummy_hash = "$2b$12$xA.2HpCbll4WXagQ3kbfvu34V5u0H67Wsff2U3Sv7Unycd/hOCeb6"
     valid = verify_password(form_data.password, user.password_hash if user else dummy_hash)
     if not user or not valid:
         raise HTTPException(status_code=401, detail="Nom d'utilisateur ou mot de passe incorrect", headers={"WWW-Authenticate": "Bearer"})
     role = db.query(Role).filter(Role.id == user.role_id).first()
     token = create_access_token({"sub": user.username, "user_id": user.id, "role": role.nom if role else "unknown"})
     return {"access_token": token, "token_type": "bearer"}
+
+def require_admin(current_user: UserPublic = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Acces reserve aux administrateurs"
+        )
+    return current_user
+
 
 @router.get("/me", response_model=UserPublic)
 def read_me(current_user: UserPublic = Depends(get_current_user)):

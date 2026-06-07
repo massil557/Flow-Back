@@ -15,6 +15,7 @@ ALLOWED_ORIGINS = [
 ALERT_EMAIL_SENDER = os.getenv("ALERT_EMAIL_SENDER", "mascioul8@gmail.com")
 ALERT_EMAIL_PASSWORD = os.getenv("ALERT_EMAIL_PASSWORD")
 ALERT_EMAIL_RECIPIENT = os.getenv("ALERT_EMAIL_RECIPIENT", "ademoulhaci123@gmail.com")
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")  # default recipient for rule-based alerts; empty = fall back to ALERT_EMAIL_RECIPIENT
 
 # Manager email for reports
 MANAGER_EMAIL = os.getenv("MANAGER_EMAIL", "manager@cevital.dz")

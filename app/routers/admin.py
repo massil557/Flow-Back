@@ -5,14 +5,9 @@ from app.models import Utilisateur, Role
 from app.schemas import UserCreate_Admin, UserUpdate_Admin, UserOut
 from app.utils.auth_utils import hash_password, generate_temp_password
 from app.services.email_service import send_credentials_email, send_update_email
-from .auth import get_current_user
+from .auth import get_current_user, require_admin
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
-
-def require_admin(current_user: UserOut = Depends(get_current_user)):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Acces reserve aux administrateurs")
-    return current_user
 
 @router.get("/users", response_model=list[UserOut])
 def list_users(db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
@@ -35,7 +30,8 @@ async def create_user(payload: UserCreate_Admin, db: Session = Depends(get_db), 
     temp_password = generate_temp_password()
     new_user = Utilisateur(
         username=payload.username, email=payload.email,
-        password_hash=hash_password(temp_password), role_id=role.id
+        password_hash=hash_password(temp_password), role_id=role.id,
+        is_admin=(payload.role == "admin"),
     )
     db.add(new_user)
     db.commit()
@@ -57,6 +53,7 @@ async def update_user(user_id: int, payload: UserUpdate_Admin, db: Session = Dep
         if not role:
             raise HTTPException(status_code=400, detail=f"Role inconnu : {payload.role}")
         user.role_id = role.id
+        user.is_admin = (payload.role == "admin")
     db.commit()
     db.refresh(user)
     role_obj = db.query(Role).filter(Role.id == user.role_id).first()
